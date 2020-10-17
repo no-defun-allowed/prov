@@ -20,31 +20,28 @@
 (defvar *scanned-counter* 0)
 (defvar *to-scan-counter* 0)
 (defun increment-scanned ()
-  (bt:with-lock-held (*counter-lock*)
-    (incf *scanned-counter*)))
+  (incf *scanned-counter*))
 (defun increment-to-scan (change)
-  (bt:with-lock-held (*counter-lock*)
-    (incf *to-scan-counter* change)))
+  (incf *to-scan-counter* change))
 (defun done? ()
   (bt:with-lock-held (*counter-lock*)
     (= *scanned-counter* *to-scan-counter*)))
 
-(defun iterate-on-pathname (channel function pathname)
-  (let ((pathname* (probe-file pathname)))
-    (cond
-      ((null pathname*)
-       (report-error "~a does not exist" pathname)
-       (increment-scanned))
-      ((null (pathname-name pathname*)) ; This is a directory
-       (let ((files (files-in pathname*)))
+(defun iterate-on-pathname (function pathname)
+  (cond
+    ((uiop:directory-exists-p pathname)
+     (let ((files (files-in pathname)))
+       (bt:with-lock-held (*counter-lock*)
          (increment-to-scan (length files))
-         (dolist (file files)
-           (lparallel:submit-task channel
-                                  #'iterate-on-pathname
-                                  channel function file)))
-       (increment-scanned))
-      (t                                ; This is a file
-       (scan-file function pathname)
+         (increment-scanned))
+       (mapc #'submit-pathname files)))
+    ((uiop:file-exists-p pathname)
+     (scan-file function pathname)
+     (bt:with-lock-held (*counter-lock*)
+       (increment-scanned)))
+    (t
+     (report-error "~a does not exist" pathname)
+     (bt:with-lock-held (*counter-lock*)
        (increment-scanned)))))
 
 (defun compile-regular-expression (regular-expression)
@@ -55,14 +52,12 @@
                      `(cffi:mem-aref ,v :char ,p))))
 
 (defun scan-pathnames (regular-expression pathnames)
-  (let ((channel (lparallel:make-channel))
-        (regular-expression (compile-regular-expression
-                             (one-more-re-nightmare:string->byte-re
-                              regular-expression)))
-        (pathnames (alexandria:ensure-list pathnames)))
-    (setf *to-scan-counter* (length pathnames)
-          *scanned-counter* 0)
-    (dolist (pathname pathnames)
-      (lparallel:submit-task channel
-                             #'iterate-on-pathname
-                             channel regular-expression pathname))))
+  (setf *to-scan-counter* (length pathnames)
+        *scanned-counter* 0
+        *function* (compile-regular-expression
+                    (one-more-re-nightmare:string->byte-re regular-expression)))
+  (mapc #'submit-pathname pathnames)
+  (dotimes (n *threads*)
+    (bt:make-thread #'worker-loop))
+  (loop until (done?)
+        do (sleep 0.001)))

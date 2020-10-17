@@ -11,14 +11,15 @@
 
 (defun scan-file (function pathname)
   (handler-case
-      (mmap:with-mmap (pointer fd length pathname)
+      (mmap:with-mmap (pointer fd length pathname :mmap '(:private :populate))
+        #+linux (madvise pointer length :sequential)
         (funcall function pointer 0 length
                  (lambda (start end submatches)
                    (declare (ignore submatches))
                    (with-output ()
-                     (format t "~&~a: ~a~%"
-                             pathname
-                             (byte-section-to-string pointer start end))))))
+                     (princ pathname)
+                     (write-string ": ")
+                     (write-line (byte-section-to-string pointer start end))))))
     (mmap:mmap-error ())
     (error (e)
       (report-error "While scanning ~a: ~a" pathname e))))
